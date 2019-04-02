@@ -126,35 +126,59 @@ for s in nonfortunes:
 #TODO
 train_data = all_data
 
-# === TRAIN ===
+
+# === PARAMS ===
 HIDDEN_DIM = 64
 EMBEDDING_DIM = 64
-EPOCHS = 100
+EPOCHS = 1000
 BATCH_SIZE = 20
 
+model_path = "checkpoints/checkpoint_700_0.02"
+do_train = False
+
 model = FortuneIdentifier(EMBEDDING_DIM, HIDDEN_DIM, vocab.size, max_len+1)
+if model_path:
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+
 loss_f = nn.BCELoss()
 optimizer = optim.SGD(model.parameters(), lr=0.01)
 
 loss_list = []
 
-print("Start training...")
-for epoch in range(EPOCHS):
-    avg_loss = 0
-    for inp, target in random.sample(train_data, BATCH_SIZE):
-        model.zero_grad()
+# === TRAIN ===
+if do_train:
+    print("Start training...")
+    for epoch in range(1, EPOCHS+1):
+        avg_loss = 0
+        for inp, target in random.sample(train_data, BATCH_SIZE):
+            model.zero_grad()
 
-        scores = model(inp)
+            scores = model(inp)
 
-        loss = loss_f(scores, target)
-        avg_loss += loss
-        loss.backward()
-        optimizer.step()
+            loss = loss_f(scores, target)
+            avg_loss += loss
+            loss.backward()
+            optimizer.step()
 
-    loss_list.append(avg_loss)
-    print(f"Epoch {epoch}\tAvg Loss: {avg_loss / BATCH_SIZE}")
+        loss_list.append(avg_loss)
+
+        # save model
+        if epoch % 50 == 0:
+            torch.save(model.state_dict(), f"checkpoints/checkpoint_{epoch}_{round((avg_loss / BATCH_SIZE).item(), 2)}")
+
+        print(f"Epoch {epoch}\tAvg Loss: {avg_loss / BATCH_SIZE}")
 
 
 # === TEST ===
 with torch.no_grad():
-    pass
+    if model_path:
+        model.load_state_dict(torch.load(model_path))
+        model.eval()
+
+    while True:
+        sen = input("> ")
+        in_t = vocab.encode(clean_sentence(sen), max_len+1)
+
+        print(model(in_t))
+    
