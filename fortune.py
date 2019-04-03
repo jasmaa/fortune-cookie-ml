@@ -1,115 +1,52 @@
+"""Main program for training, testing, and interface
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+from sklearn.model_selection import train_test_split
 import json
 import random
-import re
 
-# === MODELS ===
-class FortuneIdentifier(nn.Module):
-    """Fortune cookie identifier
-    """
-    
-    def __init__(self, embedding_dim, hidden_dim, vocab_size, max_size):
-        super(FortuneIdentifier, self).__init__()
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.max_size = max_size
+import models
+import utils
 
-        self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.lstm = nn.LSTM(embedding_dim, hidden_dim)
+USE_CUDA = torch.cuda.is_available()
+device = torch.device("cuda" if USE_CUDA else "cpu")
 
-        self.connected = nn.Sequential(
-            nn.Linear(hidden_dim * max_size, 16),
-            nn.ReLU(),
-            nn.Linear(16, 2),
-            nn.Softmax(),
-        )
+# === PARAMS ===
+HIDDEN_DIM = 64
+EMBEDDING_DIM = 64
+EPOCHS = 700
+BATCH_SIZE = 20
 
-    def forward(self, x):
-        embeds = self.embedding(x)
-        out, _ = self.lstm(embeds.view(len(x), 1, -1))
-        scores = self.connected(out.view(1, -1))
-        return scores.squeeze()
+model_path = "checkpoints/checkpoint_600_0.0"
+do_train = False
+do_eval = True
 
-# === PRE-PROCCESS ===
-class Vocab():
-    """Vocab to encode sentences to tensors
-    """
-
-    def __init__(self):
-        self.idx2word = {
-            0:"<NUL>",
-            1:"<SOS>",
-            2:"<EOS>",
-        }
-        self.word2idx = {
-            "<NUL>":0,
-            "<SOS>":1,
-            "<EOS>":2,
-        }
-        self.size = 3
-
-    def load_vocab(self, fname):
-        """Load word list into vocab
-        """
-        with open(fname, "r") as f:
-            word_list = f.read().split("\n")
-            for i, word in enumerate(word_list):
-                if not word in self.word2idx:
-                    self.idx2word[i+3] = word
-                    self.word2idx[word] = i+3
-                    self.size += 1
-
-    def encode(self, sentence, max_size):
-        """Encodes list of words to tensor using vocab
-        """
-
-        idx_list = [0] * max_size
-        i = 0
-        for word in sentence:
-            try:
-                idx_list[i] = self.word2idx[word]
-            except KeyError:
-                idx_list[i] = random.randint(3, self.size-1)
-            i += 1
-        idx_list[i] = self.word2idx["<EOS>"]
-
-        return torch.LongTensor(idx_list)
-
-
-def clean_sentence(data):
-    """Cleans sentence for indexing
-    """
-    data = data.split(" ")
-    data = list(map(lambda x: x.lower(), data))
-    data = list(map(lambda x: re.sub(r'\W+', '', x), data))
-    return data
 
 # load vocab
-vocab = Vocab()
+vocab = models.Vocab()
 vocab.load_vocab("words_alpha.txt")
 
+# load fortunes and non-fortunes
 max_len = -1
-
-# load fortunes
 fortunes = []
 with open("fortunes.json", "r") as f:
     data = json.loads(f.read())
     for key in data:
-        s = clean_sentence(data[key])
+        s = utils.clean_sentence(data[key])
         fortunes.append(s)
         if len(s) > max_len:
             max_len = len(s)
-            
-# load non-fortunes
+
 nonfortunes = []
 with open("nonfortunes.json", "r") as f:
     data = json.loads(f.read())
     for key in data:
-        s = clean_sentence(data[key])
+        s = utils.clean_sentence(data[key])
         nonfortunes.append(s)
         if len(s) > max_len:
             max_len = len(s)
@@ -117,26 +54,21 @@ with open("nonfortunes.json", "r") as f:
 
 # convert to tensor
 all_data = []
+all_targets = []
 for s in fortunes:
-    all_data.append((vocab.encode(s, max_len+1), torch.tensor([1., 0])))
+    all_data.append(vocab.encode(s, max_len+1))
+    all_targets.append(torch.tensor([1., 0]))
 for s in nonfortunes:
-    all_data.append((vocab.encode(s, max_len+1), torch.tensor([0., 1])))
+    all_data.append(vocab.encode(s, max_len+1))
+    all_targets.append(torch.tensor([0., 1]))
 
 # partition training and test data
-#TODO
-train_data = all_data
+train_in, test_in, train_targets, test_targets = train_test_split(all_data, all_targets, test_size=0.33, random_state=42)
+train_data = list(zip(train_in, train_targets))
+test_data = list(zip(test_in, test_targets))
 
-
-# === PARAMS ===
-HIDDEN_DIM = 64
-EMBEDDING_DIM = 64
-EPOCHS = 1000
-BATCH_SIZE = 20
-
-model_path = "checkpoints/checkpoint_700_0.02"
-do_train = False
-
-model = FortuneIdentifier(EMBEDDING_DIM, HIDDEN_DIM, vocab.size, max_len+1)
+# === SET UP ===
+model = models.FortuneIdentifier(EMBEDDING_DIM, HIDDEN_DIM, vocab.size, max_len+1)
 if model_path:
     model.load_state_dict(torch.load(model_path))
     model.eval()
@@ -149,6 +81,7 @@ loss_list = []
 # === TRAIN ===
 if do_train:
     print("Start training...")
+    print(f"Training size: {len(train_data)}")
     for epoch in range(1, EPOCHS+1):
         avg_loss = 0
         for inp, target in random.sample(train_data, BATCH_SIZE):
@@ -171,6 +104,30 @@ if do_train:
 
 
 # === TEST ===
+if do_eval:
+    with torch.no_grad():
+        if model_path:
+            model.load_state_dict(torch.load(model_path))
+            model.eval()
+        
+        print("Start testing...")
+        n_correct = 0
+        false_neg = 0
+        false_pos = 0
+        for inp, target in test_data:
+            out_t = model(inp)
+            if torch.argmax(out_t) == torch.argmax(target):
+                n_correct += 1
+            elif torch.argmax(out_t) == 0 and torch.argmax(target) != 0:
+                false_pos += 1
+            elif torch.argmax(out_t) == 1 and torch.argmax(target) != 1:
+                false_neg += 1
+
+        print(f"False Neg:\t{false_neg}")
+        print(f"False Pos:\t{false_pos}")
+        print(f"Correct:\t{n_correct}/{len(test_data)} = {n_correct / len(test_data)}")
+
+# === CMD INTERFACE ===
 with torch.no_grad():
     if model_path:
         model.load_state_dict(torch.load(model_path))
@@ -178,7 +135,8 @@ with torch.no_grad():
 
     while True:
         sen = input("> ")
-        in_t = vocab.encode(clean_sentence(sen), max_len+1)
-
-        print(model(in_t))
-    
+        in_t = vocab.encode(utils.clean_sentence(sen), max_len+1)
+        out_t = model(in_t)
+        
+        print(out_t)
+        print(["Fortune", "Not fortune"][torch.argmax(out_t)])
